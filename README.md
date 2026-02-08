@@ -110,6 +110,8 @@ verifies file cluster chains match recorded sizes, and detects lost file chains.
 ### Extract Mode
 
 Extracts all files and directories preserving the on-disk structure. Writes a
-`.x68k_meta` tab-separated metadata file recording path, attribute (hex),
-time (hex), and date (hex) for each entry. This metadata file is consumed by
-`scsiformat.py` to recreate images with original attributes and timestamps.
+`.x68k_meta` tab-separated metadata file recording path and attribute (hex),
+with optional time (hex) and date (hex) fields. Only path and attribute are
+required; if timestamps are omitted, `scsiformat.py` uses the host file's
+modification time instead. This metadata file is consumed by `scsiformat.py`
+to recreate images with original attributes and timestamps.

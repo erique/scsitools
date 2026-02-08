@@ -437,11 +437,14 @@ def load_metadata(meta_path):
             if not line or line.startswith("#"):
                 continue
             parts = line.split("\t")
-            if len(parts) != 4:
+            if len(parts) < 2:
                 continue
-            path, attr_hex, time_hex, date_hex = parts
+            path = parts[0]
             try:
-                meta[path] = (int(attr_hex, 16), int(time_hex, 16), int(date_hex, 16))
+                attr = int(parts[1], 16)
+                time_val = int(parts[2], 16) if len(parts) > 2 else 0
+                date_val = int(parts[3], 16) if len(parts) > 3 else 0
+                meta[path] = (attr, time_val, date_val)
             except ValueError:
                 continue
 
@@ -539,6 +542,8 @@ def load_extra_tree(directory):
                 meta_entry = meta.get(rel_path)
                 if meta_entry:
                     attr, dos_time, dos_date = meta_entry
+                    if dos_time == 0 and dos_date == 0:
+                        dos_time, dos_date = mtime_to_dos(item.stat().st_mtime)
                 else:
                     attr = 0x10
                     dos_time, dos_date = mtime_to_dos(item.stat().st_mtime)
@@ -553,6 +558,8 @@ def load_extra_tree(directory):
                 meta_entry = meta.get(rel_path)
                 if meta_entry:
                     attr, dos_time, dos_date = meta_entry
+                    if dos_time == 0 and dos_date == 0:
+                        dos_time, dos_date = mtime_to_dos(item.stat().st_mtime)
                 else:
                     attr = 0x20
                     dos_time, dos_date = mtime_to_dos(item.stat().st_mtime)

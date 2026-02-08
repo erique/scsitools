@@ -202,14 +202,20 @@ def decode_sjis(data):
                 try:
                     result.append(data[i:i + 2].decode("cp932"))
                 except (UnicodeDecodeError, ValueError):
-                    result.append(chr(0xDC00 + b))
-                    result.append(chr(0xDC00 + data[i + 1]))
+                    for raw_b in data[i:i + 2]:
+                        if raw_b >= 0x80:
+                            result.append(chr(0xDC00 + raw_b))
+                        else:
+                            result.append(chr(raw_b))
                 i += 2
             else:
                 try:
                     result.append(bytes([b]).decode("cp932"))
                 except (UnicodeDecodeError, ValueError):
-                    result.append(chr(0xDC00 + b))
+                    if b >= 0x80:
+                        result.append(chr(0xDC00 + b))
+                    else:
+                        result.append(chr(b))
                 i += 1
         return "".join(result)
 

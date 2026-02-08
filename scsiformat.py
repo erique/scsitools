@@ -171,37 +171,45 @@ def write_driver(f, driver_data, verbose=False):
     f.write(driver_data)
 
 
-def write_partition_table(f, total_records, partition_records, verbose=False):
-    """Write partition table at offset 0x800 (sector 4, i.e. record 2)."""
+def write_partition_table(f, total_records, partitions, verbose=False):
+    """Write partition table at offset 0x800 (sector 4, i.e. record 2).
+
+    partitions is a list of (name_bytes, start_record, record_count) tuples.
+    """
     if verbose:
-        print(f"  Partition table: partition_records={partition_records}")
+        for name, start, count in partitions:
+            print(f"  Partition table: {name!r} start={start} records={count}")
 
     table = bytearray(RECORD_SIZE)
 
     last_record = total_records - 1
+    last_name, last_start, last_count = partitions[-1]
+    partition_end = last_start + last_count
 
     # +0x00: "X68K" signature
     table[0x00:0x04] = PARTITION_TABLE_SIGNATURE
 
-    # +0x04, +0x08, +0x0C: total records - 1, repeated 3 times
-    struct.pack_into(">I", table, 0x04, last_record)
+    # +0x04: end of last partition (start + count)
+    struct.pack_into(">I", table, 0x04, partition_end)
+    # +0x08: total records - 1
     struct.pack_into(">I", table, 0x08, last_record)
+    # +0x0C: total records - 1
     struct.pack_into(">I", table, 0x0C, last_record)
 
-    # +0x10: partition name "Human68k"
-    table[0x10:0x10 + len(PARTITION_NAME)] = PARTITION_NAME
-
-    # +0x18: partition start record
-    struct.pack_into(">I", table, 0x18, PARTITION_START_RECORD)
-
-    # +0x1C: partition records (size of partition)
-    struct.pack_into(">I", table, 0x1C, partition_records)
+    # Partition entries at +0x10 + i*16
+    for i, (name_bytes, start_record, record_count) in enumerate(partitions):
+        off = 0x10 + i * 16
+        table[off:off + 8] = name_bytes[:8].ljust(8, b"\x00")
+        struct.pack_into(">I", table, off + 8, start_record)
+        struct.pack_into(">I", table, off + 12, record_count)
 
     f.seek(0x800)
     f.write(table)
 
 
-def write_boot_sector(f, partition_offset, template, spc, fat_recs, partition_records, root_entries=1024, verbose=False):
+def write_boot_sector(f, partition_offset, template, spc, fat_recs, partition_records,
+                      root_entries=1024, partition_start_record=PARTITION_START_RECORD,
+                      verbose=False):
     """Write partition boot sector with patched BPB fields."""
     if verbose:
         print(f"  Boot sector: spc={spc}, fat_recs={fat_recs}, root_entries={root_entries}")
@@ -228,7 +236,7 @@ def write_boot_sector(f, partition_offset, template, spc, fat_recs, partition_re
     # +0x1E (4B): partition records (big-endian)
     struct.pack_into(">I", boot, 0x1E, partition_records)
     # +0x22 (4B): partition start record (big-endian)
-    struct.pack_into(">I", boot, 0x22, PARTITION_START_RECORD)
+    struct.pack_into(">I", boot, 0x22, partition_start_record)
 
     f.seek(partition_offset)
     f.write(boot)
@@ -912,7 +920,9 @@ def main():
         if not args.no_ipl:
             write_ipl(f, ipl_data, args.verbose)
 
-        write_partition_table(f, total_records, partition_records, args.verbose)
+        write_partition_table(f, total_records,
+                              [(PARTITION_NAME, PARTITION_START_RECORD, partition_records)],
+                              args.verbose)
 
         write_driver(f, driver_data, args.verbose)
 

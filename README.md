@@ -133,24 +133,30 @@ be passed directly to `pack.py` to recreate the image.
 
 ## pack.py
 
-Reverse of `unpack.py`: takes an unpacked directory and recreates the original
-disk image. Imports `scsiformat.py` for all formatting logic.
+Reverse of `unpack.py`: takes one or more unpacked directories and recreates
+a disk image. Supports multi-partition images. Imports `scsiformat.py` for
+all formatting logic.
 
 ### Usage
 
 ```
-pack.py <extract_dir> <output_image>
+pack.py <dir1> [<dir2> ...] <output_image>
 ```
 
-Reads `partitions.json`, BPB parameters from `bootsect.bin`, and the file tree
-from the partition directory. Writes a zeroed image, formats it using
-`scsiformat.py` functions, then overlays the original `scsi_header.bin` to
-preserve the exact header bytes.
+The last argument is the output image file. All preceding arguments are unpack
+directories (as created by `unpack.py`). Each directory contributes its
+partition(s) to the output image. SCSI header, IPL, and SASI driver are taken
+from the first directory.
+
+Partitions are laid out sequentially starting at record 32. Each partition's
+BPB parameters (SPC, root entries) are preserved from its extracted
+`bootsect.bin`. For single-directory repacks the original `scsi_header.bin` is
+overlaid; for multi-directory combines a fresh SCSI header is generated.
 
 ### Round-trip workflow
 
 ```
-# Unpack
+# Unpack a single image
 python3 unpack.py disk.img /tmp/unpacked
 
 # Modify files in /tmp/unpacked/partition_0/ as needed
@@ -158,3 +164,18 @@ python3 unpack.py disk.img /tmp/unpacked
 # Repack
 python3 pack.py /tmp/unpacked recreated.hda
 ```
+
+### Multi-partition workflow
+
+```
+# Unpack several single-partition images
+python3 unpack.py hd_system.hda /tmp/hd1
+python3 unpack.py hd_games_a.hda /tmp/hd2
+python3 unpack.py hd_games_b.hda /tmp/hd3
+
+# Combine into one multi-partition image
+python3 pack.py /tmp/hd1 /tmp/hd2 /tmp/hd3 combined.hda
+```
+
+The resulting image boots with the X68000 SCSI DISK IPL MENU showing all
+partitions for selection.

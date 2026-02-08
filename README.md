@@ -26,16 +26,23 @@ The image file must already exist at the desired size (8 MB minimum).
 | `--driver <file>` | Custom SASI device driver (default: data/driver.bin) |
 | `--no-ipl` | Don't write IPL code |
 | `--root-entries <n>` | Root directory entries (default: 1024, must be multiple of 32) |
+| `--extra-files <dir>` | Install additional files from directory into root |
 | `-v, --verbose` | Show detailed output |
 | `-n, --dry-run` | Show what would be written without modifying the image |
 
-### Example
+### Examples
 
 ```
 # Create an empty 32 MB file and format it
 truncate -s 32M disk.img
 ./scsiformat.py disk.img
+
+# Format with additional files installed in the root directory
+./scsiformat.py disk.img --extra-files myfiles/
 ```
+
+Files in the `--extra-files` directory must have valid 8.3 filenames. They are
+installed with archive attribute (0x20) and timestamps from the host filesystem.
 
 ### Disk Layout
 

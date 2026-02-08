@@ -12,6 +12,7 @@ import math
 import os
 import struct
 import sys
+import time
 
 RECORD_SIZE = 1024
 PARTITION_START_RECORD = 0x20  # 32
@@ -286,6 +287,56 @@ def write_file_data(f, data_offset, cluster_size, file_data, start_cluster, verb
         f.write(b"\x00" * (cluster_size - remainder))
 
 
+def parse_83_filename(filename):
+    """Parse a filename into 8.3 name and extension components.
+
+    Returns (name, ext) with uppercase, space-padded values suitable for
+    directory entries. Raises ValueError if the name doesn't fit 8.3 format.
+    """
+    filename = filename.upper()
+    if "." in filename:
+        name, ext = filename.rsplit(".", 1)
+    else:
+        name, ext = filename, ""
+
+    if not name or len(name) > 8 or len(ext) > 3:
+        raise ValueError(f"Filename '{filename}' doesn't fit 8.3 format")
+    for ch in name + ext:
+        if ch in ' "*/:<>?\\|' or ord(ch) > 126:
+            raise ValueError(f"Invalid character '{ch}' in filename '{filename}'")
+    return name, ext
+
+
+def mtime_to_dos(mtime):
+    """Convert a Unix mtime to DOS time and date words."""
+    t = time.localtime(mtime)
+    dos_time = (t.tm_hour << 11) | (t.tm_min << 5) | (t.tm_sec // 2)
+    dos_date = ((t.tm_year - 1980) << 9) | (t.tm_mon << 5) | t.tm_mday
+    return dos_time, dos_date
+
+
+def load_extra_files(directory):
+    """Load all files from a directory for installation.
+
+    Returns a sorted list of (name, ext, data, dos_time, dos_date) tuples.
+    """
+    if not os.path.isdir(directory):
+        print(f"Error: extra files directory not found: {directory}", file=sys.stderr)
+        sys.exit(1)
+
+    files = []
+    for entry in sorted(os.listdir(directory)):
+        path = os.path.join(directory, entry)
+        if not os.path.isfile(path):
+            continue
+        name, ext = parse_83_filename(entry)
+        dos_time, dos_date = mtime_to_dos(os.path.getmtime(path))
+        with open(path, "rb") as fh:
+            data = fh.read()
+        files.append((name, ext, data, dos_time, dos_date))
+    return files
+
+
 def load_file(path, description):
     """Load a binary file, raising a clear error if not found."""
     if not os.path.isfile(path):
@@ -314,6 +365,8 @@ def main():
                         help="Don't write IPL code")
     parser.add_argument("--root-entries", type=int, default=1024,
                         help="Root directory entries (default: 1024, must be multiple of 32)")
+    parser.add_argument("--extra-files", metavar="DIR",
+                        help="Install additional files from directory into root")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show detailed output")
     parser.add_argument("-n", "--dry-run", action="store_true",
@@ -362,15 +415,43 @@ def main():
     human_data = load_file(args.human_sys, "HUMAN.SYS")
     command_data = load_file(args.command_x, "COMMAND.X")
 
+    extra_files = []
+    if args.extra_files:
+        extra_files = load_extra_files(args.extra_files)
+        if extra_files:
+            print(f"Extra files: {len(extra_files)} from {args.extra_files}")
+
     # Calculate file cluster allocations
     human_clusters = math.ceil(len(human_data) / cluster_size)
     human_start = 2  # First data cluster
     command_start = human_start + human_clusters
     command_clusters = math.ceil(len(command_data) / cluster_size)
+    next_cluster = command_start + command_clusters
+
+    extra_allocs = []
+    for name, ext, data, dos_time, dos_date in extra_files:
+        num_clusters = math.ceil(len(data) / cluster_size) if data else 0
+        extra_allocs.append((name, ext, data, dos_time, dos_date, next_cluster, num_clusters))
+        next_cluster += num_clusters
 
     if args.verbose:
         print(f"HUMAN.SYS: {len(human_data)} bytes, clusters {human_start}-{human_start + human_clusters - 1}")
         print(f"COMMAND.X: {len(command_data)} bytes, clusters {command_start}-{command_start + command_clusters - 1}")
+        for name, ext, data, _, _, start, nc in extra_allocs:
+            label = f"{name}.{ext}" if ext else name
+            if nc:
+                print(f"{label}: {len(data)} bytes, clusters {start}-{start + nc - 1}")
+            else:
+                print(f"{label}: 0 bytes (empty file)")
+
+    total_dir_entries = 2 + len(extra_allocs)
+    if total_dir_entries > args.root_entries:
+        print(f"Error: too many files ({total_dir_entries}) for root directory ({args.root_entries} entries)", file=sys.stderr)
+        sys.exit(1)
+
+    if next_cluster - 2 > clusters - 2:
+        print(f"Error: files need {next_cluster - 2} clusters but only {clusters - 2} available", file=sys.stderr)
+        sys.exit(1)
 
     if args.dry_run:
         print("\nDry run - no changes made.")
@@ -401,6 +482,9 @@ def main():
             (human_start, human_clusters),
             (command_start, command_clusters),
         ]
+        for _, _, _, _, _, start, nc in extra_allocs:
+            if nc:
+                cluster_chains.append((start, nc))
         write_fat(f, partition_offset, fat_recs, cluster_chains, args.verbose)
 
         # Directory entries: (name, ext, attr, start_cluster, size, time, date)
@@ -410,10 +494,15 @@ def main():
             ("HUMAN", "SYS", 0x24, human_start, len(human_data), 0x1C8D, 0x4457),
             ("COMMAND", "X", 0x20, command_start, len(command_data), 0x0893, 0xB544),
         ]
+        for name, ext, data, dos_time, dos_date, start, nc in extra_allocs:
+            file_entries.append((name, ext, 0x20, start, len(data), dos_time, dos_date))
         write_root_directory(f, partition_offset, fat_recs, root_dir_recs, file_entries, args.verbose)
 
         write_file_data(f, data_offset, cluster_size, human_data, human_start, args.verbose)
         write_file_data(f, data_offset, cluster_size, command_data, command_start, args.verbose)
+        for name, ext, data, _, _, start, nc in extra_allocs:
+            if data:
+                write_file_data(f, data_offset, cluster_size, data, start, args.verbose)
 
     print("Done.")
 

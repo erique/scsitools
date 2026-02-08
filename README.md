@@ -58,3 +58,51 @@ Offset 0x8000  (record 32+)   Partition 0 "Human68k"
   +FAT2 end                     Root directory
   +root end                     Data area (HUMAN.SYS, COMMAND.X)
 ```
+
+## fsck.py
+
+X68000 filesystem checker and toolkit for SxSI/SCSI disk images.
+
+### Usage
+
+```
+fsck.py [options] <command> image.hda [args...]
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `check` | Filesystem consistency check (default) |
+| `info` | Show SCSI header, partition table, and BPB details |
+| `tree` | List files in tree format with box-drawing characters |
+| `ls` | List root directory in long format (attr, size, name) |
+| `extract DIR` | Extract all files to DIR, writes `.x68k_meta` metadata |
+| `add FILE DEST` | Add file to image (requires `-w`) |
+| `mkdir PATH` | Create directory (requires `-w`) |
+| `rm PATH` | Delete file or directory (requires `-w`) |
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--depth N` | Tree depth limit (default: 3, range 1-20) |
+| `-w` | Enable write mode (required for add/mkdir/rm) |
+| `-p N` | Partition index (default: 0) |
+| `-v` | Verbose output (default: on) |
+| `--force` | Force read/write past bad sectors |
+| `--is2bytes` | Force 2-byte FAT interpretation |
+| `--is1.5bytes` | Force 1.5-byte (12-bit) FAT interpretation |
+| `--ignore-archive-attrib` | Ignore archive attribute check |
+
+### Check Mode
+
+Validates FAT link consistency (out-of-range pointers, loops, cross-links),
+verifies file cluster chains match recorded sizes, and detects lost file chains.
+
+### Extract Mode
+
+Extracts all files and directories preserving the on-disk structure. Writes a
+`.x68k_meta` tab-separated metadata file recording path, attribute (hex),
+time (hex), and date (hex) for each entry. This metadata file is consumed by
+`scsiformat.py` to recreate images with original attributes and timestamps.

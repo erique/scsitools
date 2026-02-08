@@ -1,0 +1,2 @@
+type FILE.TXT
+

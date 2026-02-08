@@ -766,6 +766,89 @@ def write_file_data(f, data_offset, cluster_size, file_data, start_cluster, verb
 
 
 # ============================================================================
+# Partition formatting (shared by scsiformat.py and pack.py)
+# ============================================================================
+
+def format_partition(f, partition_offset, partition_records, partition_start_record,
+                     boot_template, spc, root_entries, tree,
+                     human_data, command_data, human_meta, command_meta, verbose=False):
+    """Format a single partition: boot sector, FAT, root directory, and file data.
+
+    Returns True on success, False if files don't fit.
+    """
+    fat_recs, clusters = solve_fat_recs(partition_records, spc)
+    root_dir_recs = root_entries * DIR_ENTRY_SIZE // RECORD_SIZE
+    cluster_size = spc * RECORD_SIZE
+
+    print(f"  BPB: SPC={spc}, FAT={fat_recs} recs/copy, {clusters} clusters, "
+          f"root={root_entries}")
+
+    write_boot_sector(f, partition_offset, boot_template, spc, fat_recs,
+                      partition_records, root_entries, partition_start_record, verbose)
+
+    human_attr, human_time, human_date = human_meta if human_meta else (0x24, 0, 0)
+    command_attr, command_time, command_date = command_meta if command_meta else (0x20, 0, 0)
+
+    # Allocate clusters: HUMAN.SYS first, then COMMAND.X, then tree
+    human_clusters = math.ceil(len(human_data) / cluster_size)
+    human_start = 2
+    command_start = human_start + human_clusters
+    command_clusters = math.ceil(len(command_data) / cluster_size)
+    next_cluster = command_start + command_clusters
+    next_cluster = allocate_clusters(tree, next_cluster, cluster_size)
+
+    used_clusters = next_cluster - 2
+    if used_clusters > clusters - 2:
+        print(f"Error: need {used_clusters} data clusters but only {clusters - 2} available",
+              file=sys.stderr)
+        return False
+
+    # Build and write FAT
+    cluster_chains = [
+        (human_start, human_clusters),
+        (command_start, command_clusters),
+    ]
+    cluster_chains.extend(collect_cluster_chains(tree))
+    write_fat(f, partition_offset, fat_recs, cluster_chains, verbose)
+
+    # Build and write root directory
+    root_entries_list = [
+        make_dir_entry(b"HUMAN   ", b"SYS", b"\x00" * 10,
+                       human_attr, human_start, len(human_data),
+                       human_time, human_date),
+        make_dir_entry(b"COMMAND ", b"X  ", b"\x00" * 10,
+                       command_attr, command_start, len(command_data),
+                       command_time, command_date),
+    ]
+    for entry in tree:
+        if isinstance(entry, DirEntry):
+            root_entries_list.append(
+                make_dir_entry(entry.name_bytes, entry.ext_bytes, entry.name2_bytes,
+                               entry.attr, entry.start_cluster, 0,
+                               entry.dos_time, entry.dos_date))
+        else:
+            root_entries_list.append(
+                make_dir_entry(entry.name_bytes, entry.ext_bytes, entry.name2_bytes,
+                               entry.attr, entry.start_cluster, len(entry.data),
+                               entry.dos_time, entry.dos_date))
+
+    write_root_directory(f, partition_offset, fat_recs, root_dir_recs,
+                         root_entries_list, verbose)
+
+    # Write file data
+    data_offset = (partition_offset + RECORD_SIZE +
+                   fat_recs * RECORD_SIZE * 2 +
+                   root_dir_recs * RECORD_SIZE)
+    write_file_data(f, data_offset, cluster_size, human_data, human_start, verbose)
+    write_file_data(f, data_offset, cluster_size, command_data, command_start, verbose)
+    write_tree_data(f, data_offset, cluster_size, tree, 0, verbose)
+
+    total_files = 2 + count_all_entries(tree)
+    print(f"  Files: {total_files} written ({used_clusters} clusters used)")
+    return True
+
+
+# ============================================================================
 # File loading helpers
 # ============================================================================
 
@@ -907,11 +990,9 @@ def main():
         print("\nDry run - no changes made.")
         return
 
-    # Compute offsets
-    partition_offset = PARTITION_START_RECORD * RECORD_SIZE
-    data_offset = partition_offset + RECORD_SIZE + fat_recs * RECORD_SIZE * 2 + root_dir_recs * RECORD_SIZE
-
     # Format the image
+    partition_offset = PARTITION_START_RECORD * RECORD_SIZE
+
     with open(args.image_file, "r+b") as f:
         print("\nFormatting...")
 
@@ -926,56 +1007,12 @@ def main():
 
         write_driver(f, driver_data, args.verbose)
 
-        write_boot_sector(f, partition_offset, boot_template, spc, fat_recs,
-                          partition_records, args.root_entries, args.verbose)
-
-        # Build cluster chains: HUMAN.SYS, COMMAND.X, then extra tree
-        cluster_chains = [
-            (human_start, human_clusters),
-            (command_start, command_clusters),
-        ]
-        cluster_chains.extend(collect_cluster_chains(extra_tree))
-        write_fat(f, partition_offset, fat_recs, cluster_chains, args.verbose)
-
-        # Build root directory entries
-        human_name = b"HUMAN   "
-        human_ext = b"SYS"
-        human_name2 = b"\x00" * 10
-        command_name = b"COMMAND "
-        command_ext = b"X  "
-        command_name2 = b"\x00" * 10
-
-        root_entries_list = [
-            make_dir_entry(human_name, human_ext, human_name2,
-                           human_attr, human_start, len(human_data),
-                           human_time, human_date),
-            make_dir_entry(command_name, command_ext, command_name2,
-                           command_attr, command_start, len(command_data),
-                           command_time, command_date),
-        ]
-
-        # Add extra tree root-level entries
-        for entry in extra_tree:
-            if isinstance(entry, DirEntry):
-                root_entries_list.append(
-                    make_dir_entry(entry.name_bytes, entry.ext_bytes, entry.name2_bytes,
-                                   entry.attr, entry.start_cluster, 0,
-                                   entry.dos_time, entry.dos_date))
-            else:
-                root_entries_list.append(
-                    make_dir_entry(entry.name_bytes, entry.ext_bytes, entry.name2_bytes,
-                                   entry.attr, entry.start_cluster, len(entry.data),
-                                   entry.dos_time, entry.dos_date))
-
-        write_root_directory(f, partition_offset, fat_recs, root_dir_recs,
-                             root_entries_list, args.verbose)
-
-        # Write file data
-        write_file_data(f, data_offset, cluster_size, human_data, human_start, args.verbose)
-        write_file_data(f, data_offset, cluster_size, command_data, command_start, args.verbose)
-
-        # Write extra tree data (subdirectories and files)
-        write_tree_data(f, data_offset, cluster_size, extra_tree, 0, args.verbose)
+        human_meta_tuple = (human_attr, human_time, human_date)
+        command_meta_tuple = (command_attr, command_time, command_date)
+        format_partition(f, partition_offset, partition_records, PARTITION_START_RECORD,
+                         boot_template, spc, args.root_entries, extra_tree,
+                         human_data, command_data, human_meta_tuple, command_meta_tuple,
+                         args.verbose)
 
     print("Done.")
 

@@ -25,23 +25,21 @@ import scsiformat
 def compute_min_partition_records(tree, human_data, command_data, spc, root_entries):
     """Compute the minimum partition_records needed to hold the given data.
 
-    Iteratively solves for fat_recs since FAT size depends on cluster count
-    which depends on data_recs which depends on FAT size.
+    Uses allocate_clusters on a copy of the tree to get exact cluster count,
+    then iteratively solves for fat_recs.
     """
     cluster_size = spc * scsiformat.RECORD_SIZE
     root_dir_recs = root_entries * scsiformat.DIR_ENTRY_SIZE // scsiformat.RECORD_SIZE
 
-    # Count data clusters needed
-    data_clusters = 0
-    data_clusters += max(1, math.ceil(len(human_data) / cluster_size))
-    data_clusters += max(1, math.ceil(len(command_data) / cluster_size))
-    data_clusters += count_tree_clusters(tree, cluster_size)
-
-    # data_clusters occupy data_clusters * spc records in the data area
+    # Count data clusters needed using the same logic as allocate_clusters
+    human_clusters = max(1, math.ceil(len(human_data) / cluster_size))
+    command_clusters = max(1, math.ceil(len(command_data) / cluster_size))
+    next_cluster = 2 + human_clusters + command_clusters
+    next_cluster = scsiformat.allocate_clusters(tree, next_cluster, cluster_size)
+    data_clusters = next_cluster - 2
     data_recs_needed = data_clusters * spc
 
-    # Iteratively solve: partition_records = 1 + 2*fat_recs + root_dir_recs + data_recs
-    # But fat_recs depends on total clusters = data_recs // spc + 2
+    # Iteratively solve for fat_recs
     fat_recs = 1
     for _ in range(30):
         partition_records = 1 + 2 * fat_recs + root_dir_recs + data_recs_needed
@@ -52,110 +50,6 @@ def compute_min_partition_records(tree, human_data, command_data, spc, root_entr
         fat_recs = needed_fat_recs
 
     return partition_records
-
-
-def count_tree_clusters(entries, cluster_size):
-    """Count total clusters needed for all entries in the tree."""
-    total = 0
-    for entry in entries:
-        if isinstance(entry, scsiformat.DirEntry):
-            subdir_bytes = (len(entry.children) + 2) * scsiformat.DIR_ENTRY_SIZE
-            total += max(1, math.ceil(subdir_bytes / cluster_size))
-            total += count_tree_clusters(entry.children, cluster_size)
-        else:
-            total += max(1, math.ceil(len(entry.data) / cluster_size))
-    return total
-
-
-def format_partition(f, partition_offset, partition_records, partition_start_record,
-                     bootsect_data, tree, human_data, command_data,
-                     human_meta, command_meta, verbose):
-    """Format a single partition at the given offset.
-
-    Writes boot sector, FAT, root directory, and all file data.
-    """
-    spc = bootsect_data[0x14]
-    fat_recs = bootsect_data[0x1D]
-    root_entries = struct.unpack_from(">H", bootsect_data, 0x18)[0]
-    root_dir_recs = root_entries * scsiformat.DIR_ENTRY_SIZE // scsiformat.RECORD_SIZE
-    cluster_size = spc * scsiformat.RECORD_SIZE
-
-    # Recompute BPB from the actual partition_records we're using
-    fat_recs, clusters = scsiformat.solve_fat_recs(partition_records, spc)
-
-    data_recs = partition_records - 1 - 2 * fat_recs - root_dir_recs
-
-    print(f"  BPB: SPC={spc}, FAT={fat_recs} recs/copy, {clusters} clusters, "
-          f"root={root_entries}")
-
-    scsiformat.write_boot_sector(f, partition_offset, bootsect_data, spc, fat_recs,
-                                 partition_records, root_entries, partition_start_record,
-                                 verbose)
-
-    human_attr, human_time, human_date = human_meta if human_meta else (0x24, 0, 0)
-    command_attr, command_time, command_date = command_meta if command_meta else (0x20, 0, 0)
-
-    # Allocate clusters: HUMAN.SYS first, then COMMAND.X, then tree
-    human_clusters = math.ceil(len(human_data) / cluster_size)
-    human_start = 2
-    command_start = human_start + human_clusters
-    command_clusters = math.ceil(len(command_data) / cluster_size)
-    next_cluster = command_start + command_clusters
-    next_cluster = scsiformat.allocate_clusters(tree, next_cluster, cluster_size)
-
-    used_clusters = next_cluster - 2
-    if used_clusters > clusters - 2:
-        print(f"  Error: need {used_clusters} data clusters but only {clusters - 2} available",
-              file=sys.stderr)
-        return False
-
-    # Build and write FAT
-    cluster_chains = [
-        (human_start, human_clusters),
-        (command_start, command_clusters),
-    ]
-    cluster_chains.extend(scsiformat.collect_cluster_chains(tree))
-    scsiformat.write_fat(f, partition_offset, fat_recs, cluster_chains, verbose)
-
-    # Build and write root directory
-    root_entries_list = [
-        scsiformat.make_dir_entry(b"HUMAN   ", b"SYS", b"\x00" * 10,
-                                  human_attr, human_start, len(human_data),
-                                  human_time, human_date),
-        scsiformat.make_dir_entry(b"COMMAND ", b"X  ", b"\x00" * 10,
-                                  command_attr, command_start, len(command_data),
-                                  command_time, command_date),
-    ]
-    for entry in tree:
-        if isinstance(entry, scsiformat.DirEntry):
-            root_entries_list.append(
-                scsiformat.make_dir_entry(entry.name_bytes, entry.ext_bytes,
-                                          entry.name2_bytes, entry.attr,
-                                          entry.start_cluster, 0,
-                                          entry.dos_time, entry.dos_date))
-        else:
-            root_entries_list.append(
-                scsiformat.make_dir_entry(entry.name_bytes, entry.ext_bytes,
-                                          entry.name2_bytes, entry.attr,
-                                          entry.start_cluster, len(entry.data),
-                                          entry.dos_time, entry.dos_date))
-
-    scsiformat.write_root_directory(f, partition_offset, fat_recs, root_dir_recs,
-                                    root_entries_list, verbose)
-
-    # Write file data
-    data_offset = (partition_offset + scsiformat.RECORD_SIZE +
-                   fat_recs * scsiformat.RECORD_SIZE * 2 +
-                   root_dir_recs * scsiformat.RECORD_SIZE)
-    scsiformat.write_file_data(f, data_offset, cluster_size, human_data,
-                               human_start, verbose)
-    scsiformat.write_file_data(f, data_offset, cluster_size, command_data,
-                               command_start, verbose)
-    scsiformat.write_tree_data(f, data_offset, cluster_size, tree, 0, verbose)
-
-    total_files = 2 + scsiformat.count_all_entries(tree)
-    print(f"  Files: {total_files} written ({used_clusters} clusters used)")
-    return True
 
 
 def load_partition_data(extract_dir, part_info):
@@ -304,10 +198,14 @@ def main():
         # Format each partition
         for i, pd in enumerate(partition_data):
             print(f"\nPartition {i}:")
+            bootsect_data = pd["bootsect_data"]
+            spc = bootsect_data[0x14]
+            root_entries = struct.unpack_from(">H", bootsect_data, 0x18)[0]
             partition_offset = pd["start_record"] * scsiformat.RECORD_SIZE
-            ok = format_partition(
+            ok = scsiformat.format_partition(
                 f, partition_offset, pd["partition_records"], pd["start_record"],
-                pd["bootsect_data"], pd["tree"], pd["human_data"], pd["command_data"],
+                bootsect_data, spc, root_entries, pd["tree"],
+                pd["human_data"], pd["command_data"],
                 pd["human_meta"], pd["command_meta"], args.verbose)
             if not ok:
                 return 1

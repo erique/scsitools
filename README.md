@@ -7,6 +7,10 @@ The file size determines the disk geometry. Creates a single Human68k
 partition with FAT16 filesystem and installs HUMAN.SYS + COMMAND.X for
 a bootable system.
 
+Supports long filenames (Human68k 18+3 format via the fileName2 field),
+recursive subdirectory creation, Shift-JIS filename handling (cp932 encoding),
+and file attribute/timestamp preservation via `.x68k_meta` metadata files.
+
 ### Usage
 
 ```
@@ -41,8 +45,11 @@ truncate -s 32M disk.img
 ./scsiformat.py disk.img --extra-files myfiles/
 ```
 
-Files in the `--extra-files` directory must have valid 8.3 filenames. They are
-installed with archive attribute (0x20) and timestamps from the host filesystem.
+The `--extra-files` directory is installed recursively with full support for
+long filenames, subdirectories, and Shift-JIS encoded names. If a `.x68k_meta`
+file is present (as written by `fsck.py extract`), file attributes and
+timestamps are restored from it. HUMAN.SYS and COMMAND.X found in
+`--extra-files` replace the default system files.
 
 ### Disk Layout
 

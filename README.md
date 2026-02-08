@@ -47,7 +47,7 @@ truncate -s 32M disk.img
 
 The `--extra-files` directory is installed recursively with full support for
 long filenames, subdirectories, and Shift-JIS encoded names. If a `.x68k_meta`
-file is present (as written by `fsck.py extract`), file attributes and
+file is present (as written by `fsck.py extract` or `unpack.py`), file attributes and
 timestamps are restored from it. HUMAN.SYS and COMMAND.X found in
 `--extra-files` replace the default system files.
 
@@ -114,4 +114,47 @@ Extracts all files and directories preserving the on-disk structure. Writes a
 with optional time (hex) and date (hex) fields. Only path and attribute are
 required; if timestamps are omitted, `scsiformat.py` uses the host file's
 modification time instead. This metadata file is consumed by `scsiformat.py`
-to recreate images with original attributes and timestamps.
+and `pack.py` to recreate images with original attributes and timestamps.
+
+## unpack.py
+
+Unpacks everything from an X68000 SxSI disk image into a directory structure
+that captures all data needed to recreate the image with `pack.py`.
+
+### Usage
+
+```
+unpack.py <image> <output_dir>
+```
+
+Extracts SCSI header, IPL, SASI driver, partition table metadata, boot sector,
+and all files/directories with `.x68k_meta` metadata. The output directory can
+be passed directly to `pack.py` to recreate the image.
+
+## pack.py
+
+Reverse of `unpack.py`: takes an unpacked directory and recreates the original
+disk image. Imports `scsiformat.py` for all formatting logic.
+
+### Usage
+
+```
+pack.py <extract_dir> <output_image>
+```
+
+Reads `partitions.json`, BPB parameters from `bootsect.bin`, and the file tree
+from the partition directory. Writes a zeroed image, formats it using
+`scsiformat.py` functions, then overlays the original `scsi_header.bin` to
+preserve the exact header bytes.
+
+### Round-trip workflow
+
+```
+# Unpack
+python3 unpack.py disk.img /tmp/unpacked
+
+# Modify files in /tmp/unpacked/partition_0/ as needed
+
+# Repack
+python3 pack.py /tmp/unpacked recreated.hda
+```

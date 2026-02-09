@@ -31,6 +31,7 @@ The image file must already exist at the desired size (8 MB minimum).
 | `--no-ipl` | Don't write IPL code |
 | `--root-entries <n>` | Root directory entries (default: 1024, must be multiple of 32) |
 | `--extra-files <dir>` | Install additional files from directory into root |
+| `--volume-label <label>` | Set volume label (up to 11 SJIS bytes) |
 | `-v, --verbose` | Show detailed output |
 | `-n, --dry-run` | Show what would be written without modifying the image |
 

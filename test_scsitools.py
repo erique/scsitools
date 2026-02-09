@@ -29,6 +29,20 @@ slow = pytest.mark.slow
 # Name pools for random tree generation
 # ============================================================================
 
+VOLUME_LABELS_ASCII = [
+    "SYSTEM", "GAMES", "WORK", "BACKUP", "DATA", "TOOLS", "MUSIC",
+    "HD0", "DISK01", "SRC",
+]
+
+VOLUME_LABELS_JAPANESE = [
+    "\u30b2\u30fc\u30e0",      # ゲーム
+    "\u30c7\u30fc\u30bf",      # データ
+    "\u30c4\u30fc\u30eb",      # ツール
+    "\u30e1\u30a4\u30f3",      # メイン
+]
+
+VOLUME_LABELS = VOLUME_LABELS_ASCII + VOLUME_LABELS_JAPANESE
+
 ASCII_SHORT_NAMES = [
     "File", "Data", "ReadMe", "Config", "Setup", "Main", "Test", "Work",
     "Temp", "Log", "Src", "Lib", "Bin", "Doc", "Img", "Snd", "Gfx", "Map",
@@ -314,11 +328,13 @@ def make_image(path, size_mb):
         f.write(b"\x00")
 
 
-def format_image(path, extra_dir=None, verbose=False):
+def format_image(path, extra_dir=None, verbose=False, volume_label=None):
     """Run scsiformat.py on an image."""
     args = [path]
     if extra_dir:
         args += ["--extra-files", extra_dir]
+    if volume_label:
+        args += ["--volume-label", volume_label]
     if verbose:
         args.append("-v")
     return run_tool("scsiformat.py", *args)
@@ -895,6 +911,97 @@ class TestLarge:
         fsck_extract(image, ext_dir)
         compare_with_originals(ext_dir, tree_dir)
 
+    def test_everything(self, tmp_path):
+        """Kitchen-sink test: 5x256MB, volume labels, Japanese+English, full roundtrip.
+
+        Exercises every feature in one image suitable for MAME boot-testing.
+        """
+        import json
+
+        rng = random.Random(5000)
+        # Partition 2 has no label (None) to test the mixed case
+        labels = [rng.choice(VOLUME_LABELS) for _ in range(5)]
+        labels[2] = None
+
+        images = []
+        tree_dirs = []
+
+        for i in range(5):
+            tree_dir = str(tmp_path / f"tree_{i}")
+            target = 200 * 1024 * 1024
+            jp_ratio = 0.5 if i % 2 == 0 else 0.2
+            generate_large_tree(tree_dir, seed=5000 + i, target_bytes=target,
+                                max_depth=3, japanese_ratio=jp_ratio)
+            tree_dirs.append(tree_dir)
+
+            img = str(tmp_path / f"part_{i}.hda")
+            make_image(img, 256)
+            format_image(img, extra_dir=tree_dir, volume_label=labels[i])
+            images.append(img)
+
+        # Unpack all
+        unpacked_dirs = []
+        for i, img in enumerate(images):
+            unpacked = str(tmp_path / f"unpacked_{i}")
+            run_tool("unpack.py", img, unpacked)
+            unpacked_dirs.append(unpacked)
+
+        # Verify labels in partitions.json
+        for i, udir in enumerate(unpacked_dirs):
+            with open(os.path.join(udir, "partitions.json")) as f:
+                ptable = json.load(f)
+            got = ptable["partitions"][0].get("volume_label")
+            assert got == labels[i], \
+                f"Partition {i}: expected label {labels[i]!r}, got {got!r}"
+
+        # Pack combined
+        combined = str(tmp_path / "combined.hda")
+        run_tool("pack.py", *unpacked_dirs, combined)
+
+        # Verify all partitions pass check
+        for i in range(5):
+            fsck_check(combined, partition=i)
+
+        # Verify labels in fsck info (skip None)
+        info = fsck_info(combined)
+        for i, label in enumerate(labels):
+            if label is not None:
+                assert label in info, \
+                    f"Partition {i} label {label!r} not found in combined info"
+
+        # Extract each partition and compare with originals
+        for i in range(5):
+            ext_dir = str(tmp_path / f"ext_{i}")
+            fsck_extract(combined, ext_dir, partition=i)
+            compare_with_originals(ext_dir, tree_dirs[i])
+
+        # Full cycle: unpack combined → repack → verify everything again
+        unpacked_combined = str(tmp_path / "unpacked_combined")
+        run_tool("unpack.py", combined, unpacked_combined)
+
+        with open(os.path.join(unpacked_combined, "partitions.json")) as f:
+            ptable = json.load(f)
+        for i in range(5):
+            got = ptable["partitions"][i].get("volume_label")
+            assert got == labels[i], \
+                f"Partition {i}: expected {labels[i]!r}, got {got!r}"
+
+        repacked = str(tmp_path / "repacked.hda")
+        run_tool("pack.py", unpacked_combined, repacked)
+
+        for i in range(5):
+            fsck_check(repacked, partition=i)
+            ext_a = str(tmp_path / f"ext_{i}")
+            ext_b = str(tmp_path / f"ext_repack_{i}")
+            fsck_extract(repacked, ext_b, partition=i)
+            compare_extractions(ext_a, ext_b)
+
+        info_repacked = fsck_info(repacked)
+        for i, label in enumerate(labels):
+            if label is not None:
+                assert label in info_repacked, \
+                    f"Partition {i} label {label!r} lost after repack"
+
 
 # ============================================================================
 # Group 5: Multi-partition small (fast)
@@ -961,3 +1068,153 @@ class TestMultiPartitionSmall:
             ext_dir = str(tmp_path / f"ext_{i}")
             fsck_extract(combined, ext_dir, partition=i)
             compare_with_originals(ext_dir, tree_dirs[i])
+
+
+# ============================================================================
+# Group 6: Volume label tests
+# ============================================================================
+
+class TestVolumeLabel:
+    def test_make_volume_label_entry(self):
+        """Unit test: verify 32-byte entry, attr=0x08, name padded."""
+        entry = scsiformat.make_volume_label_entry("TESTDISK")
+        assert len(entry) == 32
+        assert entry[0x0B] == 0x08
+        assert entry[0x00:0x0B] == b"TESTDISK   "
+        # cluster and size must be zero
+        assert entry[0x1A:0x1C] == b"\x00\x00"
+        assert entry[0x1C:0x20] == b"\x00\x00\x00\x00"
+        # name2 must be zero
+        assert entry[0x0C:0x16] == b"\x00" * 10
+
+    def test_make_volume_label_entry_japanese(self):
+        """Unit test: Japanese label encodes correctly."""
+        entry = scsiformat.make_volume_label_entry("\u30b2\u30fc\u30e0")  # ゲーム
+        assert len(entry) == 32
+        assert entry[0x0B] == 0x08
+        sjis = "\u30b2\u30fc\u30e0".encode("cp932")  # 6 bytes
+        padded = sjis.ljust(11, b"\x20")
+        assert entry[0x00:0x0B] == padded
+
+    def test_make_volume_label_entry_too_long(self):
+        """Unit test: label >11 SJIS bytes raises ValueError."""
+        with pytest.raises(ValueError, match="too long"):
+            scsiformat.make_volume_label_entry("A" * 12)
+
+    def test_make_volume_label_entry_empty(self):
+        """Unit test: empty label raises ValueError."""
+        with pytest.raises(ValueError, match="empty"):
+            scsiformat.make_volume_label_entry("")
+
+    def test_format_with_label(self, tmp_path):
+        """8MB with --volume-label TESTDISK, fsck check passes, info shows label."""
+        image = str(tmp_path / "labeled.hda")
+        make_image(image, 8)
+        format_image(image, volume_label="TESTDISK")
+        fsck_check(image)
+
+        info = fsck_info(image)
+        assert "TESTDISK" in info
+
+    def test_format_with_japanese_label(self, tmp_path):
+        """Japanese label, fsck check passes, info shows label."""
+        label = "\u30b2\u30fc\u30e0"  # ゲーム
+        image = str(tmp_path / "jp_label.hda")
+        make_image(image, 8)
+        format_image(image, volume_label=label)
+        fsck_check(image)
+
+        info = fsck_info(image)
+        assert label in info
+
+    def test_format_with_label_and_files(self, tmp_path):
+        """Volume label + extra files, all pass check."""
+        tree_dir = tmp_path / "tree"
+        generate_random_tree(str(tree_dir), seed=500, max_files=15)
+
+        image = str(tmp_path / "label_files.hda")
+        make_image(image, 8)
+        format_image(image, extra_dir=str(tree_dir), volume_label="MYFILES")
+        fsck_check(image)
+
+        info = fsck_info(image)
+        assert "MYFILES" in info
+
+    def test_roundtrip_volume_label(self, tmp_path):
+        """format → unpack → verify partitions.json has label → pack → check → unpack → label still there."""
+        import json
+
+        label = "TESTDISK"
+        image = str(tmp_path / "orig.hda")
+        make_image(image, 8)
+        format_image(image, volume_label=label)
+        fsck_check(image)
+
+        # Unpack
+        unpacked = str(tmp_path / "unpacked")
+        run_tool("unpack.py", image, unpacked)
+
+        # Verify partitions.json has the label
+        with open(os.path.join(unpacked, "partitions.json")) as f:
+            ptable = json.load(f)
+        assert ptable["partitions"][0].get("volume_label") == label
+
+        # Pack
+        repacked = str(tmp_path / "repacked.hda")
+        run_tool("pack.py", unpacked, repacked)
+        fsck_check(repacked)
+
+        info = fsck_info(repacked)
+        assert label in info
+
+        # Unpack again and verify label preserved
+        unpacked2 = str(tmp_path / "unpacked2")
+        run_tool("unpack.py", repacked, unpacked2)
+        with open(os.path.join(unpacked2, "partitions.json")) as f:
+            ptable2 = json.load(f)
+        assert ptable2["partitions"][0].get("volume_label") == label
+
+    def test_multi_partition_labels(self, tmp_path):
+        """3 partitions with different labels, all preserved through unpack/pack cycle."""
+        import json
+
+        rng = random.Random(600)
+        labels = [rng.choice(VOLUME_LABELS) for _ in range(3)]
+
+        images = []
+        for i in range(3):
+            tree_dir = str(tmp_path / f"tree_{i}")
+            generate_random_tree(tree_dir, seed=600 + i, max_files=10)
+
+            img = str(tmp_path / f"part_{i}.hda")
+            make_image(img, 8)
+            format_image(img, extra_dir=tree_dir, volume_label=labels[i])
+            images.append(img)
+
+        # Unpack all
+        unpacked = []
+        for i, img in enumerate(images):
+            u = str(tmp_path / f"unpacked_{i}")
+            run_tool("unpack.py", img, u)
+            unpacked.append(u)
+
+        # Pack combined
+        combined = str(tmp_path / "combined.hda")
+        run_tool("pack.py", *unpacked, combined)
+
+        # Verify each partition
+        for i in range(3):
+            fsck_check(combined, partition=i)
+
+        # Verify fsck info shows all labels
+        info = fsck_info(combined)
+        for label in labels:
+            assert label in info, f"Label {label!r} not found in info output"
+
+        # Unpack combined and verify partitions.json
+        unpacked_combined = str(tmp_path / "unpacked_combined")
+        run_tool("unpack.py", combined, unpacked_combined)
+        with open(os.path.join(unpacked_combined, "partitions.json")) as f:
+            ptable = json.load(f)
+        for i in range(3):
+            assert ptable["partitions"][i].get("volume_label") == labels[i]

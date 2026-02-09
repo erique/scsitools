@@ -77,7 +77,9 @@ def load_partition_data(extract_dir, part_info):
             os.path.join(scsiformat.DATA_DIR, "COMMAND.X"), "COMMAND.X")
         command_meta = None
 
-    return bootsect_data, tree, human_data, command_data, human_meta, command_meta
+    volume_label = part_info.get("volume_label")
+
+    return bootsect_data, tree, human_data, command_data, human_meta, command_meta, volume_label
 
 
 def main():
@@ -114,8 +116,8 @@ def main():
             ptable = json.load(f)
 
         for part_info in ptable["partitions"]:
-            bootsect_data, tree, human_data, command_data, human_meta, command_meta = \
-                load_partition_data(extract_dir, part_info)
+            bootsect_data, tree, human_data, command_data, human_meta, command_meta, \
+                volume_label = load_partition_data(extract_dir, part_info)
 
             spc = bootsect_data[0x14]
             root_entries = struct.unpack_from(">H", bootsect_data, 0x18)[0]
@@ -138,6 +140,7 @@ def main():
                 "command_meta": command_meta,
                 "partition_records": partition_records,
                 "min_records": min_records,
+                "volume_label": volume_label,
             })
 
     # Layout partitions sequentially
@@ -206,7 +209,8 @@ def main():
                 f, partition_offset, pd["partition_records"], pd["start_record"],
                 bootsect_data, spc, root_entries, pd["tree"],
                 pd["human_data"], pd["command_data"],
-                pd["human_meta"], pd["command_meta"], args.verbose)
+                pd["human_meta"], pd["command_meta"], args.verbose,
+                volume_label=pd["volume_label"])
             if not ok:
                 return 1
 

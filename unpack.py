@@ -323,6 +323,30 @@ def iter_directory(fp, bpb, fat, cluster=0):
 
 
 # =============================================================================
+# Volume label detection
+# =============================================================================
+
+def find_volume_label(fp, bpb):
+    """Scan root directory for a volume label entry (attr 0x08).
+
+    Returns the label string (SJIS decoded, trailing spaces stripped) or None.
+    """
+    fp.seek(bpb["root_offset"])
+    total_bytes = bpb["root_dir_recs"] * RECORD_SIZE
+    data = fp.read(total_bytes)
+    for i in range(len(data) // 32):
+        raw = data[i * 32:(i + 1) * 32]
+        if raw[0] == 0x00:
+            break
+        if raw[0] == 0xE5:
+            continue
+        if raw[11] == 0x08:
+            label_bytes = raw[0:11]
+            return decode_sjis(label_bytes).rstrip()
+    return None
+
+
+# =============================================================================
 # File extraction
 # =============================================================================
 
@@ -342,6 +366,8 @@ def extract_directory(fp, bpb, fat, cluster, output_dir, meta_file, rel_path, ve
     errors = 0
 
     for entry in iter_directory(fp, bpb, fat, cluster):
+        if entry["attr"] == 0x08:
+            continue
         name = entry["name"]
         entry_rel = rel_path + name if rel_path else name
         out_path = os.path.join(output_dir, name)
@@ -460,16 +486,6 @@ def main():
             else:
                 print("SASI driver: not present (all zeros, skipped)")
 
-        # Save partition table metadata
-        ptable_info = {
-            "total_records_minus1": ptable["total_records_minus1"],
-            "partitions": ptable["partitions"],
-        }
-        ptable_path = os.path.join(args.output_dir, "partitions.json")
-        with open(ptable_path, "w") as f:
-            json.dump(ptable_info, f, indent=2)
-        print(f"Partition table: {len(ptable['partitions'])} partition(s) -> partitions.json")
-
         # Extract each partition
         for part in ptable["partitions"]:
             part_idx = part["index"]
@@ -505,6 +521,12 @@ def main():
             # Read FAT
             fat = read_fat(fp, bpb)
 
+            # Detect volume label
+            vol_label = find_volume_label(fp, bpb)
+            if vol_label is not None:
+                print(f"  Volume label: \"{vol_label}\"")
+                part["volume_label"] = vol_label
+
             # Extract all files
             meta_path = os.path.join(part_dir, ".x68k_meta")
             with open(meta_path, "w", encoding="utf-8", errors="surrogateescape") as meta_file:
@@ -515,6 +537,16 @@ def main():
             print(f"  Files: {extracted} extracted"
                   + (f", {errors} errors" if errors else ""))
             print(f"  Metadata: -> partition_{part_idx}/.x68k_meta")
+
+        # Save partition table metadata (after extraction so volume labels are included)
+        ptable_info = {
+            "total_records_minus1": ptable["total_records_minus1"],
+            "partitions": ptable["partitions"],
+        }
+        ptable_path = os.path.join(args.output_dir, "partitions.json")
+        with open(ptable_path, "w") as f:
+            json.dump(ptable_info, f, indent=2)
+        print(f"\nPartition table: {len(ptable['partitions'])} partition(s) -> partitions.json")
 
     print(f"\nExtraction complete -> {args.output_dir}/")
     return 0

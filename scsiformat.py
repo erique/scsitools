@@ -286,6 +286,26 @@ def write_fat(f, partition_offset, fat_recs, cluster_chains, verbose=False):
 # Directory entry creation
 # ============================================================================
 
+def make_volume_label_entry(label_str):
+    """Create a 32-byte volume label directory entry.
+
+    label_str is a UTF-8 string, encoded to SJIS (cp932), max 11 bytes.
+    Returns 32 bytes: name[0:11] = SJIS label space-padded, byte[11] = 0x08,
+    rest all zeros.
+    """
+    sjis = label_str.encode("cp932")
+    if len(sjis) > 11:
+        raise ValueError(f"Volume label too long ({len(sjis)} SJIS bytes, max 11): {label_str!r}")
+    if len(sjis) == 0:
+        raise ValueError("Volume label cannot be empty")
+
+    entry = bytearray(DIR_ENTRY_SIZE)
+    padded = sjis.ljust(11, b"\x20")
+    entry[0x00:0x0B] = padded
+    entry[0x0B] = 0x08
+    return bytes(entry)
+
+
 def make_dir_entry(name_bytes, ext_bytes, name2_bytes, attr, start_cluster,
                    file_size, dos_time=0, dos_date=0):
     """Create a 32-byte directory entry.
@@ -771,7 +791,8 @@ def write_file_data(f, data_offset, cluster_size, file_data, start_cluster, verb
 
 def format_partition(f, partition_offset, partition_records, partition_start_record,
                      boot_template, spc, root_entries, tree,
-                     human_data, command_data, human_meta, command_meta, verbose=False):
+                     human_data, command_data, human_meta, command_meta,
+                     verbose=False, volume_label=None):
     """Format a single partition: boot sector, FAT, root directory, and file data.
 
     Returns True on success, False if files don't fit.
@@ -812,14 +833,17 @@ def format_partition(f, partition_offset, partition_records, partition_start_rec
     write_fat(f, partition_offset, fat_recs, cluster_chains, verbose)
 
     # Build and write root directory
-    root_entries_list = [
+    root_entries_list = []
+    if volume_label is not None:
+        root_entries_list.append(make_volume_label_entry(volume_label))
+    root_entries_list.extend([
         make_dir_entry(b"HUMAN   ", b"SYS", b"\x00" * 10,
                        human_attr, human_start, len(human_data),
                        human_time, human_date),
         make_dir_entry(b"COMMAND ", b"X  ", b"\x00" * 10,
                        command_attr, command_start, len(command_data),
                        command_time, command_date),
-    ]
+    ])
     for entry in tree:
         if isinstance(entry, DirEntry):
             root_entries_list.append(
@@ -886,6 +910,8 @@ def main():
                         help="Root directory entries (default: 1024, must be multiple of 32)")
     parser.add_argument("--extra-files", metavar="DIR",
                         help="Install additional files/directories from directory")
+    parser.add_argument("--volume-label", metavar="LABEL",
+                        help="Set volume label (up to 11 SJIS bytes)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show detailed output")
     parser.add_argument("-n", "--dry-run", action="store_true",
@@ -974,8 +1000,10 @@ def main():
         print(f"HUMAN.SYS: {len(human_data)} bytes, clusters {human_start}-{human_start + human_clusters - 1}")
         print(f"COMMAND.X: {len(command_data)} bytes, clusters {command_start}-{command_start + command_clusters - 1}")
 
-    # Count root directory entries: HUMAN.SYS + COMMAND.X + extra tree root entries
+    # Count root directory entries: volume label + HUMAN.SYS + COMMAND.X + extra tree root entries
     root_entry_count = 2 + count_tree_entries(extra_tree)
+    if args.volume_label:
+        root_entry_count += 1
     if root_entry_count > args.root_entries:
         print(f"Error: too many root entries ({root_entry_count}) for root directory "
               f"({args.root_entries} max)", file=sys.stderr)
@@ -1012,7 +1040,7 @@ def main():
         format_partition(f, partition_offset, partition_records, PARTITION_START_RECORD,
                          boot_template, spc, args.root_entries, extra_tree,
                          human_data, command_data, human_meta_tuple, command_meta_tuple,
-                         args.verbose)
+                         args.verbose, volume_label=args.volume_label)
 
     print("Done.")
 

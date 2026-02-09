@@ -398,6 +398,22 @@ def print_partitions(fp):
             print(f"    Root dir:      sector {bpb['root_top']} ({bpb['root_sectors']} sectors)")
             print(f"    Data area:     sector {bpb['data_top']}")
             print(f"    Clusters:      {bpb['cluster_num']}")
+
+            # Check for volume label in root directory
+            root_offset = partition_offset + bpb['root_top'] * SECTOR_SIZE
+            root_size = bpb['root_sectors'] * SECTOR_SIZE
+            fp.seek(root_offset)
+            root_data = fp.read(root_size)
+            for ri in range(len(root_data) // 32):
+                raw = root_data[ri * 32:(ri + 1) * 32]
+                if raw[0] == 0x00:
+                    break
+                if raw[0] == 0xE5:
+                    continue
+                if raw[11] == 0x08:
+                    label = decode_sjis(raw[0:11]).rstrip()
+                    print(f"    Volume label:  {label}")
+                    break
         print()
 
     if part_count == 0:

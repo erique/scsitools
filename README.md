@@ -179,3 +179,16 @@ python3 pack.py /tmp/hd1 /tmp/hd2 /tmp/hd3 combined.hda
 
 The resulting image boots with the X68000 SCSI DISK IPL MENU showing all
 partitions for selection.
+
+## Tests
+
+```
+# Fast tests only (~2 seconds)
+python3 -m pytest test_scsitools.py -v -m "not slow"
+
+# Full suite including large images (~30 seconds)
+python3 -m pytest test_scsitools.py -v
+
+# Only large image tests
+python3 -m pytest test_scsitools.py -v -m slow
+```

@@ -1218,3 +1218,7 @@ class TestVolumeLabel:
             ptable = json.load(f)
         for i in range(3):
             assert ptable["partitions"][i].get("volume_label") == labels[i]
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

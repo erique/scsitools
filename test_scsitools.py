@@ -1220,5 +1220,166 @@ class TestVolumeLabel:
             assert ptable["partitions"][i].get("volume_label") == labels[i]
 
 
+# ============================================================================
+# Group 7: Raw binary partition (--partition) tests
+# ============================================================================
+
+class TestRawPartition:
+    def test_single_raw_partition(self, tmp_path):
+        """Format with one --partition blob, verify it appears in the image at the right offset."""
+        import struct
+
+        # Create a raw partition blob with recognizable content
+        blob_data = b"\xAA" * 512 + b"\xBB" * 512  # 1024 bytes = 1 record
+        blob_file = str(tmp_path / "raw.hdf")
+        with open(blob_file, "wb") as f:
+            f.write(blob_data)
+
+        image = str(tmp_path / "test.hda")
+        make_image(image, 20)
+        run_tool("scsiformat.py", image, "--partition", f"DATA:{blob_file}")
+
+        # Human68k partition should still pass fsck
+        fsck_check(image)
+
+        # Read partition table and find the raw partition
+        with open(image, "rb") as f:
+            f.seek(0x800)  # Partition table at sector 4
+            ptable = f.read(1024)
+
+        assert ptable[0:4] == b"X68K"
+
+        # Second partition entry starts at offset 0x10 + 0x10 = 0x20
+        pentry = ptable[0x20:0x30]
+        p_name = pentry[0x00:0x08]
+        p_start = struct.unpack(">I", pentry[0x08:0x0C])[0]
+        p_count = struct.unpack(">I", pentry[0x0C:0x10])[0]
+
+        assert p_name.rstrip(b" ") == b"DATA"
+        assert p_count >= 1
+
+        # Verify the blob data is at the correct offset
+        with open(image, "rb") as f:
+            f.seek(p_start * 1024)  # records are 1024 bytes
+            read_back = f.read(len(blob_data))
+
+        assert read_back == blob_data
+
+    def test_raw_partition_with_files(self, tmp_path):
+        """Format with --extra-files AND --partition, both coexist."""
+        tree_dir = str(tmp_path / "tree")
+        generate_random_tree(tree_dir, seed=700, max_files=10)
+
+        blob_data = bytes(range(256)) * 8  # 2048 bytes
+        blob_file = str(tmp_path / "part.hdf")
+        with open(blob_file, "wb") as f:
+            f.write(blob_data)
+
+        image = str(tmp_path / "test.hda")
+        make_image(image, 20)
+        run_tool("scsiformat.py", image, "--extra-files", tree_dir,
+                 "--partition", f"EXTRA:{blob_file}")
+
+        # Human68k partition passes check
+        fsck_check(image)
+
+        # Extract and verify original files survived
+        ext_dir = str(tmp_path / "extracted")
+        fsck_extract(image, ext_dir)
+        compare_with_originals(ext_dir, tree_dir)
+
+    def test_multiple_raw_partitions(self, tmp_path):
+        """Two --partition blobs, both appear in correct order."""
+        import struct
+
+        blob1 = b"\x11" * 2048
+        blob2 = b"\x22" * 4096
+        f1 = str(tmp_path / "p1.hdf")
+        f2 = str(tmp_path / "p2.hdf")
+        with open(f1, "wb") as f:
+            f.write(blob1)
+        with open(f2, "wb") as f:
+            f.write(blob2)
+
+        image = str(tmp_path / "test.hda")
+        make_image(image, 20)
+        run_tool("scsiformat.py", image,
+                 "--partition", f"PART1:{f1}",
+                 "--partition", f"PART2:{f2}")
+
+        fsck_check(image)
+
+        # Read partition table
+        with open(image, "rb") as f:
+            f.seek(0x800)
+            ptable = f.read(1024)
+
+        # Entry 1 (index 1) = PART1, Entry 2 (index 2) = PART2
+        for idx, (name, blob) in enumerate([(b"PART1", blob1), (b"PART2", blob2)], start=1):
+            offset = 0x10 + idx * 0x10
+            pentry = ptable[offset:offset + 0x10]
+            p_name = pentry[0x00:0x08]
+            p_start = struct.unpack(">I", pentry[0x08:0x0C])[0]
+
+            assert p_name.rstrip(b" ") == name
+
+            with open(image, "rb") as f:
+                f.seek(p_start * 1024)
+                read_back = f.read(len(blob))
+            assert read_back == blob
+
+    def test_large_raw_partition(self, tmp_path):
+        """5MB raw partition blob, data integrity check."""
+        blob_size = 5 * 1024 * 1024
+        rng = random.Random(800)
+        blob_data = rng.randbytes(blob_size)
+
+        blob_file = str(tmp_path / "big.hdf")
+        with open(blob_file, "wb") as f:
+            f.write(blob_data)
+
+        image = str(tmp_path / "test.hda")
+        make_image(image, 20)
+        run_tool("scsiformat.py", image, "--partition", f"BIG:{blob_file}")
+
+        fsck_check(image)
+
+        # Find partition and verify data
+        import struct
+        with open(image, "rb") as f:
+            f.seek(0x800)
+            ptable = f.read(1024)
+            pentry = ptable[0x20:0x30]
+            p_start = struct.unpack(">I", pentry[0x08:0x0C])[0]
+
+            f.seek(p_start * 1024)
+            read_back = f.read(blob_size)
+
+        assert read_back == blob_data
+
+    def test_raw_partition_too_large(self, tmp_path):
+        """Partition blob larger than the image itself should fail."""
+        # 8MB image but 9MB blob — can't possibly fit
+        blob_data = b"\x00" * (9 * 1024 * 1024)
+        blob_file = str(tmp_path / "huge.hdf")
+        with open(blob_file, "wb") as f:
+            f.write(blob_data)
+
+        image = str(tmp_path / "test.hda")
+        make_image(image, 8)
+        result = run_tool("scsiformat.py", image,
+                          "--partition", f"HUGE:{blob_file}", check=False)
+        assert result.returncode != 0, \
+            f"Expected failure but got success: {result.stdout}"
+
+    def test_raw_partition_bad_format(self, tmp_path):
+        """--partition without colon in spec should fail."""
+        image = str(tmp_path / "test.hda")
+        make_image(image, 8)
+        result = run_tool("scsiformat.py", image,
+                          "--partition", "NOCOLON", check=False)
+        assert result.returncode != 0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -912,6 +912,10 @@ def main():
                         help="Install additional files/directories from directory")
     parser.add_argument("--volume-label", metavar="LABEL",
                         help="Set volume label (up to 11 SJIS bytes)")
+    parser.add_argument("--partition", action="append", metavar="NAME:FILE",
+                        help="Add a raw binary partition (e.g. 'DATA:image.hdf'). "
+                             "The file is written verbatim at the partition offset. "
+                             "Can be specified multiple times.")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show detailed output")
     parser.add_argument("-n", "--dry-run", action="store_true",
@@ -939,7 +943,28 @@ def main():
         sys.exit(1)
 
     total_records = file_size // RECORD_SIZE
-    partition_records = total_records - 33
+
+    # Parse extra partitions (--partition NAME:FILE)
+    extra_partitions = []
+    extra_total_records = 0
+    if args.partition:
+        for spec in args.partition:
+            if ":" not in spec:
+                print(f"Error: --partition must be NAME:FILE (got '{spec}')", file=sys.stderr)
+                sys.exit(1)
+            pname, pfile = spec.split(":", 1)
+            pname = pname.encode("ascii").ljust(8, b" ")[:8]
+            pdata = load_file(pfile, f"Partition image '{spec}'")
+            precords = math.ceil(len(pdata) / RECORD_SIZE)
+            extra_partitions.append((pname, pdata, precords))
+            extra_total_records += precords
+
+    partition_records = total_records - 33 - extra_total_records
+
+    if partition_records < 100:
+        print(f"Error: Human68k partition too small ({partition_records} records). "
+              f"Extra partitions need {extra_total_records} records.", file=sys.stderr)
+        sys.exit(1)
 
     # Calculate BPB parameters
     spc, fat_recs, clusters, root_dir_recs = calculate_bpb(partition_records, args.root_entries)
@@ -1029,9 +1054,14 @@ def main():
         if not args.no_ipl:
             write_ipl(f, ipl_data, args.verbose)
 
-        write_partition_table(f, total_records,
-                              [(PARTITION_NAME, PARTITION_START_RECORD, partition_records)],
-                              args.verbose)
+        # Build partition list: Human68k first, then extra partitions
+        all_partitions = [(PARTITION_NAME, PARTITION_START_RECORD, partition_records)]
+        next_record = PARTITION_START_RECORD + partition_records + 1
+        for pname, pdata, precords in extra_partitions:
+            all_partitions.append((pname, next_record, precords))
+            next_record += precords
+
+        write_partition_table(f, total_records, all_partitions, args.verbose)
 
         write_driver(f, driver_data, args.verbose)
 
@@ -1041,6 +1071,20 @@ def main():
                          boot_template, spc, args.root_entries, extra_tree,
                          human_data, command_data, human_meta_tuple, command_meta_tuple,
                          args.verbose, volume_label=args.volume_label)
+
+        # Write extra partition blobs
+        blob_record = PARTITION_START_RECORD + partition_records + 1
+        for pname, pdata, precords in extra_partitions:
+            blob_offset = blob_record * RECORD_SIZE
+            f.seek(blob_offset)
+            f.write(pdata)
+            # Pad to record boundary
+            remainder = len(pdata) % RECORD_SIZE
+            if remainder:
+                f.write(b"\x00" * (RECORD_SIZE - remainder))
+            print(f"  Partition '{pname.decode().strip()}': {len(pdata)} bytes "
+                  f"at record {blob_record} (offset 0x{blob_offset:X})")
+            blob_record += precords
 
     print("Done.")
 

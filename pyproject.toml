@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scsitools"
+version = "0.1.0"
+description = "X68000 SxSI disk image tools"
+requires-python = ">=3.8"
+
+[project.scripts]
+scsiformat = "scsiformat:main"
+scsifs = "fsck:main"
+scsipack = "pack:main"
+scsiunpack = "unpack:main"
+
+[tool.setuptools]
+py-modules = ["scsiformat", "fsck", "pack", "unpack"]
